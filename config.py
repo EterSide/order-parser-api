@@ -26,6 +26,10 @@ class Settings(BaseSettings):
     # RAG
     RAG_TOP_K: int = 20  # 유사도 검색 결과 개수
     
+    # Cache
+    CACHE_TTL: int = 172800  # 캐시 TTL (48시간 = 48 * 3600초)
+    CACHE_MAX_SIZE: int = 1000  # 최대 캐시 항목 개수
+    
     class Config:
         env_file = ".env"
         case_sensitive = True

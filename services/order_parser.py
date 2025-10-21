@@ -5,7 +5,11 @@ from openai import OpenAI
 from typing import List, Dict, Any, Optional
 import json
 import logging
+import hashlib
+import asyncio
+import random
 from difflib import SequenceMatcher
+from cachetools import TTLCache
 from config import settings
 
 logger = logging.getLogger(__name__)
@@ -18,8 +22,38 @@ class OrderParserService:
         """OpenAI 클라이언트 초기화"""
         self.client = OpenAI(api_key=settings.OPENAI_API_KEY)
         self.model = settings.OPENAI_MODEL
+        
+        # 캐시 초기화 (TTL: 48시간, 최대 1000개 항목)
+        self.parse_cache = TTLCache(
+            maxsize=settings.CACHE_MAX_SIZE,
+            ttl=settings.CACHE_TTL
+        )
+        logger.info(f"주문 파싱 캐시 초기화 완료 (TTL: {settings.CACHE_TTL}초 = {settings.CACHE_TTL/3600:.1f}시간, 최대 크기: {settings.CACHE_MAX_SIZE}개)")
     
-    def parse_order(
+    def _generate_cache_key(self, order_text: str, similar_menus: List[Dict[str, Any]]) -> str:
+        """
+        캐시 키 생성 (주문 텍스트 + 메뉴 ID 리스트의 해시값)
+        
+        Args:
+            order_text: 주문 텍스트
+            similar_menus: 유사 메뉴 리스트
+            
+        Returns:
+            캐시 키 (해시값)
+        """
+        # 주문 텍스트 정규화 (소문자, 공백 제거)
+        normalized_text = order_text.lower().replace(" ", "")
+        
+        # 메뉴 ID 리스트 (정렬하여 순서 무관하게)
+        menu_ids = sorted([m['product_id'] for m in similar_menus])
+        
+        # 캐시 키 생성
+        cache_input = f"{normalized_text}|{','.join(map(str, menu_ids))}"
+        cache_key = hashlib.md5(cache_input.encode('utf-8')).hexdigest()
+        
+        return cache_key
+    
+    async def parse_order(
         self, 
         order_text: str, 
         similar_menus: List[Dict[str, Any]]
@@ -35,6 +69,20 @@ class OrderParserService:
             파싱된 주문 데이터
         """
         try:
+            # 캐시 키 생성
+            cache_key = self._generate_cache_key(order_text, similar_menus)
+            
+            # 캐시 확인
+            if cache_key in self.parse_cache:
+                # UX를 위한 인위적 지연 (1.0~2.0초)
+                delay = random.uniform(1.0, 2.0)
+                logger.info(f"🎯 캐시 히트! 주문: '{order_text[:30]}...' (캐시 키: {cache_key[:8]})")
+                logger.info(f"⏳ AI 분석 중... ({delay:.2f}초 대기 - UX 개선)")
+                await asyncio.sleep(delay)
+                
+                cached_result = self.parse_cache[cache_key]
+                logger.info(f"📊 캐시 상태: {len(self.parse_cache)}/{settings.CACHE_MAX_SIZE}개 항목 저장 중")
+                return cached_result
             # 디버깅: 검색된 메뉴 목록 로깅
             logger.info(f"RAG 검색 결과 ({len(similar_menus)}개):")
             for idx, menu in enumerate(similar_menus[:5], 1):  # 상위 5개만
@@ -212,6 +260,10 @@ class OrderParserService:
             logger.info("=" * 80)
             
             logger.info(f"주문 파싱 완료: {order_text} -> {len(parsed_result.get('items', []))}개 항목")
+            
+            # 캐시에 저장
+            self.parse_cache[cache_key] = parsed_result
+            logger.info(f"💾 캐시 저장 완료 (캐시 키: {cache_key[:8]}, 현재 캐시 크기: {len(self.parse_cache)}/{settings.CACHE_MAX_SIZE})")
             
             return parsed_result
             

@@ -279,8 +279,8 @@ async def parse_order(
         
         logger.info(f"유사 메뉴 {len(similar_menus)}개 발견")
         
-        # 2. GPT로 주문 파싱
-        parsed_result = order_parser_service.parse_order(
+        # 2. GPT로 주문 파싱 (캐시 적용 - 동일 요청 시 빠른 응답)
+        parsed_result = await order_parser_service.parse_order(
             order_text=request.order_text,
             similar_menus=similar_menus
         )
@@ -354,8 +354,8 @@ async def recommend_menus(
     try:
         logger.info(f"메뉴 추천 요청: {request.user_preference}")
         
-        # RAG + LLM을 사용한 메뉴 추천
-        result = rag_service.recommend_menus(
+        # RAG + LLM을 사용한 메뉴 추천 (캐시 적용 - 동일 요청 시 빠른 응답)
+        result = await rag_service.recommend_menus(
             db=db,
             user_preference=request.user_preference,
             max_results=request.max_results or 5

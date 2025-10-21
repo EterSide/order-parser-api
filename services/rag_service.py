@@ -10,7 +10,11 @@ from sqlalchemy.orm import Session
 from database.models import Product, Category, OptionGroup, Option, ProductCategory, ProductOptionGroup
 from config import settings
 import logging
+import hashlib
+import asyncio
+import random
 from openai import OpenAI
+from cachetools import TTLCache
 import json
 
 logger = logging.getLogger(__name__)
@@ -39,6 +43,13 @@ class RAGService:
         # OpenAI 클라이언트 초기화 (메뉴 추천용)
         self.openai_client = OpenAI(api_key=settings.OPENAI_API_KEY)
         self.model = settings.OPENAI_MODEL
+        
+        # 메뉴 추천 캐시 초기화 (TTL: 48시간, 최대 1000개 항목)
+        self.recommendation_cache = TTLCache(
+            maxsize=settings.CACHE_MAX_SIZE,
+            ttl=settings.CACHE_TTL
+        )
+        logger.info(f"메뉴 추천 캐시 초기화 완료 (TTL: {settings.CACHE_TTL}초 = {settings.CACHE_TTL/3600:.1f}시간, 최대 크기: {settings.CACHE_MAX_SIZE}개)")
         
     def initialize_collection(self, db: Session) -> Dict[str, Any]:
         """
@@ -386,7 +397,27 @@ class RAGService:
         
         return menus
     
-    def recommend_menus(
+    def _generate_recommendation_cache_key(self, user_preference: str, max_results: int) -> str:
+        """
+        추천 캐시 키 생성
+        
+        Args:
+            user_preference: 사용자 요청사항
+            max_results: 추천할 메뉴 개수
+            
+        Returns:
+            캐시 키 (해시값)
+        """
+        # 정규화 (소문자, 공백 제거)
+        normalized_pref = user_preference.lower().replace(" ", "")
+        
+        # 캐시 키 생성
+        cache_input = f"{normalized_pref}|{max_results}"
+        cache_key = hashlib.md5(cache_input.encode('utf-8')).hexdigest()
+        
+        return cache_key
+    
+    async def recommend_menus(
         self, 
         db: Session, 
         user_preference: str, 
@@ -405,6 +436,21 @@ class RAGService:
         """
         try:
             logger.info(f"메뉴 추천 요청: '{user_preference}'")
+            
+            # 캐시 키 생성
+            cache_key = self._generate_recommendation_cache_key(user_preference, max_results)
+            
+            # 캐시 확인
+            if cache_key in self.recommendation_cache:
+                # UX를 위한 인위적 지연 (1.0~2.0초)
+                delay = random.uniform(1.0, 2.0)
+                logger.info(f"🎯 캐시 히트! 추천 요청: '{user_preference[:30]}...' (캐시 키: {cache_key[:8]})")
+                logger.info(f"⏳ AI 추천 분석 중... ({delay:.2f}초 대기 - UX 개선)")
+                await asyncio.sleep(delay)
+                
+                cached_result = self.recommendation_cache[cache_key]
+                logger.info(f"📊 캐시 상태: {len(self.recommendation_cache)}/{settings.CACHE_MAX_SIZE}개 항목 저장 중")
+                return cached_result
             
             # 0. 사용자 요청에서 카테고리 추출
             detected_category = self._extract_category_from_request(user_preference)
@@ -517,12 +563,18 @@ class RAGService:
             # 4. 결과 포맷팅
             recommendations = llm_result.get('recommendations', [])
             
-            return {
+            result = {
                 "recommendations": recommendations,
                 "user_preference": user_preference,
                 "total_count": len(recommendations),
                 "notes": llm_result.get('notes', '')
             }
+            
+            # 캐시에 저장
+            self.recommendation_cache[cache_key] = result
+            logger.info(f"💾 추천 캐시 저장 완료 (캐시 키: {cache_key[:8]}, 현재 캐시 크기: {len(self.recommendation_cache)}/{settings.CACHE_MAX_SIZE})")
+            
+            return result
             
         except json.JSONDecodeError as e:
             logger.error(f"JSON 파싱 오류: {str(e)}")
