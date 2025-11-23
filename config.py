@@ -12,7 +12,7 @@ class Settings(BaseSettings):
     DATABASE_URL: str = "mysql+pymysql://user:password@localhost:3306/kiosk_db"
     
     # OpenAI
-    OPENAI_API_KEY: str
+    OPENAI_API_KEY: str = ""
     OPENAI_MODEL: str = "gpt-4o-mini"
     
     # ChromaDB

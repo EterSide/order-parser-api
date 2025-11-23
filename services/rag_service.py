@@ -397,6 +397,107 @@ class RAGService:
         
         return menus
     
+    def _extract_attributes_from_request(self, user_preference: str) -> Dict[str, Any]:
+        """
+        사용자 요청에서 속성 추출 (매운, 달콤한, 바삭한 등)
+        
+        Args:
+            user_preference: 사용자 요청사항
+            
+        Returns:
+            추출된 속성 딕셔너리
+        """
+        preference_lower = user_preference.lower()
+        
+        # 속성 키워드 매칭
+        attribute_keywords = {
+            "매운": ["매운", "맵다", "맵게", "핫", "hot", "스파이시", "spicy", "고추", "칠리"],
+            "달콤한": ["달콤한", "달다", "달게", "스위트", "sweet", "설탕"],
+            "바삭한": ["바삭한", "바삭", "크리스피", "crispy", "튀김"],
+            "신선한": ["신선한", "신선", "fresh"],
+            "고소한": ["고소한", "고소", "치즈", "cheese"],
+            "저칼로리": ["저칼로리", "다이어트", "제로", "zero", "칼로리", "칼로리 낮은"],
+            "소고기": ["소고기", "소", "비프", "beef", "와퍼"],
+            "치킨": ["치킨", "닭", "치킨버거", "chicken"],
+            "새우": ["새우", "슈림프", "shrimp"],
+        }
+        
+        detected_attributes = {}
+        for attribute, keywords in attribute_keywords.items():
+            for keyword in keywords:
+                if keyword in preference_lower:
+                    detected_attributes[attribute] = True
+                    logger.info(f"속성 감지: '{attribute}' (키워드: '{keyword}')")
+                    break
+        
+        return detected_attributes
+    
+    def _filter_by_attributes(self, menus: List[Dict[str, Any]], attributes: Dict[str, Any]) -> List[Dict[str, Any]]:
+        """
+        속성별로 메뉴 필터링
+        
+        Args:
+            menus: 메뉴 리스트
+            attributes: 추출된 속성 딕셔너리
+            
+        Returns:
+            필터링된 메뉴 리스트
+        """
+        if not attributes:
+            return menus
+        
+        filtered = []
+        for menu in menus:
+            menu_name_lower = menu.get('product_name', '').lower()
+            menu_desc_lower = menu.get('description', '').lower() if menu.get('description') else ''
+            menu_text = f"{menu_name_lower} {menu_desc_lower}"
+            
+            # 각 속성에 대해 매칭 확인
+            matches_all = True
+            for attribute in attributes.keys():
+                if attribute == "매운":
+                    # 매운 속성 키워드 확인
+                    spicy_keywords = ['매운', '맵다', '핫', 'hot', '스파이시', 'spicy', '고추', '칠리', '불닭', '핫소스']
+                    if not any(keyword in menu_text for keyword in spicy_keywords):
+                        matches_all = False
+                        break
+                elif attribute == "달콤한":
+                    sweet_keywords = ['달콤한', '달다', '스위트', 'sweet', '설탕', '시럽']
+                    if not any(keyword in menu_text for keyword in sweet_keywords):
+                        matches_all = False
+                        break
+                elif attribute == "바삭한":
+                    crispy_keywords = ['바삭', '크리스피', 'crispy', '튀김', '프라이']
+                    if not any(keyword in menu_text for keyword in crispy_keywords):
+                        matches_all = False
+                        break
+                elif attribute == "소고기":
+                    beef_keywords = ['소고기', '소', '비프', 'beef', '와퍼']
+                    if not any(keyword in menu_text for keyword in beef_keywords):
+                        matches_all = False
+                        break
+                elif attribute == "치킨":
+                    chicken_keywords = ['치킨', '닭', 'chicken']
+                    if not any(keyword in menu_text for keyword in chicken_keywords):
+                        matches_all = False
+                        break
+                elif attribute == "새우":
+                    shrimp_keywords = ['새우', '슈림프', 'shrimp']
+                    if not any(keyword in menu_text for keyword in shrimp_keywords):
+                        matches_all = False
+                        break
+            
+            if matches_all:
+                filtered.append(menu)
+        
+        if filtered:
+            logger.info(f"속성 필터링: {len(menus)}개 → {len(filtered)}개 (속성: {list(attributes.keys())})")
+        else:
+            logger.warning(f"속성 필터링 후 메뉴 없음 (속성: {list(attributes.keys())})")
+        
+        # ✅ 속성 필터링 실패 시 빈 배열 반환 (요청과 맞지 않는 메뉴 추천 방지)
+        return filtered
+    
     def _generate_recommendation_cache_key(self, user_preference: str, max_results: int) -> str:
         """
         추천 캐시 키 생성
@@ -452,8 +553,9 @@ class RAGService:
                 logger.info(f"📊 캐시 상태: {len(self.recommendation_cache)}/{settings.CACHE_MAX_SIZE}개 항목 저장 중")
                 return cached_result
             
-            # 0. 사용자 요청에서 카테고리 추출
+            # 0. 사용자 요청에서 카테고리 및 속성 추출
             detected_category = self._extract_category_from_request(user_preference)
+            detected_attributes = self._extract_attributes_from_request(user_preference)
             
             # 1. RAG로 사용자 취향과 유사한 메뉴 검색
             # 검색 범위를 좀 더 넓게 (최대 30개로 증가 - 필터링 후 충분한 결과 보장)
@@ -473,6 +575,17 @@ class RAGService:
             
             logger.info(f"RAG 검색 완료: {len(similar_menus)}개 후보 메뉴 발견")
             
+            # 1.4. 유사도 점수 기반 필터링 (유사도가 0.6 미만이면 제외)
+            similarity_filtered = [
+                m for m in similar_menus 
+                if m.get('similarity_score', 0) >= 0.6
+            ]
+            if similarity_filtered:
+                logger.info(f"유사도 필터링: {len(similar_menus)}개 → {len(similarity_filtered)}개 (임계값: 0.6)")
+                similar_menus = similarity_filtered
+            else:
+                logger.warning("유사도 필터링 후 메뉴 없음, 필터링 제거")
+            
             # 1.5. 카테고리 필터링 적용
             filtered_menus = self._filter_by_category(similar_menus, detected_category)
             
@@ -480,12 +593,26 @@ class RAGService:
                 logger.warning(f"'{detected_category}' 카테고리 필터링 후 메뉴 없음, 원본 사용")
                 filtered_menus = similar_menus
             
-            # 2. 메뉴 컨텍스트 생성
-            menu_context = self._build_recommendation_context(filtered_menus[:15])  # 상위 15개만 LLM에 전달
+            # 1.6. 속성 필터링 적용 (매운, 달콤한 등)
+            if detected_attributes:
+                filtered_menus = self._filter_by_attributes(filtered_menus, detected_attributes)
+                if not filtered_menus:
+                    # ✅ 속성 필터링 실패 시 빈 결과 반환 (요청과 맞지 않는 메뉴 추천 방지)
+                    logger.warning(f"속성 필터링 후 메뉴 없음 - 요청한 속성({list(detected_attributes.keys())})과 일치하는 메뉴가 없습니다")
+                    return {
+                        "recommendations": [],
+                        "user_preference": user_preference,
+                        "total_count": 0,
+                        "notes": f"요청하신 '{', '.join(detected_attributes.keys())}' 속성을 가진 메뉴를 찾을 수 없습니다. 다른 요청사항으로 다시 시도해주세요."
+                    }
+            
+            # 2. 메뉴 컨텍스트 생성 (속도 개선: 15개 → 10개)
+            menu_context = self._build_recommendation_context(filtered_menus[:10])  # 상위 10개만 LLM에 전달
             
             # 3. LLM으로 추천 이유 생성
-            # 카테고리 제약 조건 생성
+            # 카테고리 및 속성 제약 조건 생성
             category_constraint = ""
+            attribute_constraint = ""
             recommendation_principle_5 = "다양한 카테고리의 메뉴를 균형있게 추천하세요 (메인, 사이드, 음료 등)"
             
             if detected_category != "전체":
@@ -498,8 +625,18 @@ class RAGService:
                 category_constraint = f"\n⚠️ **중요**: 고객이 '{category_map.get(detected_category, detected_category)}' 요청했으므로, 반드시 해당 카테고리의 메뉴만 추천하세요!"
                 recommendation_principle_5 = "해당 카테고리의 메뉴만 추천하세요"
             
+            # 속성 제약 조건 추가
+            if detected_attributes:
+                attribute_list = list(detected_attributes.keys())
+                attribute_constraint = f"""
+⚠️ **절대 지켜야 할 규칙**: 
+- 고객이 '{', '.join(attribute_list)}' 속성을 요청했으므로, **반드시 해당 속성을 가진 메뉴만** 추천하세요!
+- 요청한 속성이 없는 메뉴는 **절대 추천하지 마세요**!
+- 만약 제공된 메뉴 목록에 요청한 속성을 가진 메뉴가 없다면, **빈 배열([])을 반환**하세요!
+- 억지로 추천하지 마세요! 고객의 요청과 맞지 않는 메뉴를 추천하는 것보다 추천하지 않는 것이 낫습니다!"""
+            
             system_prompt = f"""당신은 햄버거 가게의 친절한 메뉴 추천 전문가입니다.
-고객의 취향과 요청사항을 듣고, 가장 적합한 메뉴를 추천해주는 역할입니다.{category_constraint}
+고객의 취향과 요청사항을 듣고, 가장 적합한 메뉴를 추천해주는 역할입니다.{category_constraint}{attribute_constraint}
 
 **추천 원칙:**
 1. 고객의 취향과 요청사항을 정확히 파악하세요
@@ -509,10 +646,9 @@ class RAGService:
 5. {recommendation_principle_5}
 
 **추천 이유 작성 가이드:**
-- "고객님이 [취향]을 원하셨는데, 이 메뉴는 [특징]이 있어 딱 맞습니다"
-- 메뉴의 맛, 재료, 특징을 구체적으로 언급하세요
-- 고객의 상황(다이어트, 매운 음식 선호 등)에 맞춰 설명하세요
-- 친근하고 자연스러운 톤으로 작성하세요
+- 간결하고 명확하게 작성하세요 (1-2문장 권장)
+- 고객의 요청사항과 메뉴의 핵심 특징을 연결하세요
+- 예: "고객님이 [취향]을 원하셨는데, 이 메뉴는 [특징]이 있어 딱 맞습니다"
 
 **응답 형식 (JSON):**
 {{
@@ -523,7 +659,7 @@ class RAGService:
             "description": "제품 설명" (있으면),
             "price": 실수,
             "categories": "카테고리",
-            "recommendation_reason": "구체적인 추천 이유 (2-3문장)",
+            "recommendation_reason": "간결한 추천 이유 (1-2문장)",
             "similarity_score": 실수
         }}
     ],
@@ -539,7 +675,7 @@ class RAGService:
 위 고객의 취향에 가장 적합한 메뉴 **{max_results}개**를 선택하고, 각 메뉴마다 구체적인 추천 이유를 작성해주세요.
 다양한 카테고리를 고려하여 균형있게 추천해주세요."""
             
-            # OpenAI API 호출
+            # OpenAI API 호출 (속도 개선: max_tokens 감소, temperature 조정)
             response = self.openai_client.chat.completions.create(
                 model=self.model,
                 messages=[
@@ -547,8 +683,8 @@ class RAGService:
                     {"role": "user", "content": user_prompt}
                 ],
                 response_format={"type": "json_object"},
-                temperature=0.7,  # 창의적인 추천 이유 생성을 위해 적당한 temperature
-                max_tokens=2000
+                temperature=0.5,  # 속도와 창의성 균형 (0.7 → 0.5)
+                max_tokens=1000  # 속도 개선 (2000 → 1000)
             )
             
             # 응답 파싱
@@ -560,8 +696,66 @@ class RAGService:
             logger.info(json.dumps(llm_result, ensure_ascii=False, indent=2))
             logger.info("=" * 80)
             
-            # 4. 결과 포맷팅
+            # 4. 결과 포맷팅 및 검증
             recommendations = llm_result.get('recommendations', [])
+            
+            # ✅ 최종 검증: 속성이 요청되었는데 일치하지 않는 메뉴가 추천되었는지 확인
+            if detected_attributes and recommendations:
+                # 각 추천 메뉴가 요청한 속성을 가지고 있는지 확인
+                valid_recommendations = []
+                for rec in recommendations:
+                    product_name = rec.get('product_name', '').lower()
+                    product_desc = rec.get('description', '').lower() if rec.get('description') else ''
+                    product_text = f"{product_name} {product_desc}"
+                    
+                    # 속성 매칭 확인
+                    matches_all_attributes = True
+                    for attribute in detected_attributes.keys():
+                        if attribute == "매운":
+                            spicy_keywords = ['매운', '맵다', '핫', 'hot', '스파이시', 'spicy', '고추', '칠리', '불닭', '핫소스']
+                            if not any(keyword in product_text for keyword in spicy_keywords):
+                                matches_all_attributes = False
+                                break
+                        elif attribute == "달콤한":
+                            sweet_keywords = ['달콤한', '달다', '스위트', 'sweet', '설탕', '시럽']
+                            if not any(keyword in product_text for keyword in sweet_keywords):
+                                matches_all_attributes = False
+                                break
+                        # 다른 속성들도 동일하게 체크...
+                    
+                    if matches_all_attributes:
+                        valid_recommendations.append(rec)
+                    else:
+                        logger.warning(f"⚠️ 속성 불일치 메뉴 제외: {rec.get('product_name')} (요청 속성: {list(detected_attributes.keys())})")
+                
+                # 유효한 추천이 없으면 빈 배열 반환
+                if not valid_recommendations:
+                    logger.warning("⚠️ 모든 추천이 속성과 일치하지 않음 - 빈 결과 반환")
+                    return {
+                        "recommendations": [],
+                        "user_preference": user_preference,
+                        "total_count": 0,
+                        "notes": f"요청하신 '{', '.join(detected_attributes.keys())}' 속성을 가진 메뉴를 찾을 수 없습니다. 다른 요청사항으로 다시 시도해주세요."
+                    }
+                
+                recommendations = valid_recommendations
+            
+            # ✅ 유사도 점수 검증: 0.5 미만이면 제외
+            if recommendations:
+                filtered_by_similarity = [
+                    rec for rec in recommendations 
+                    if rec.get('similarity_score', 0) >= 0.5
+                ]
+                if filtered_by_similarity:
+                    recommendations = filtered_by_similarity
+                else:
+                    logger.warning("⚠️ 모든 추천의 유사도 점수가 0.5 미만 - 빈 결과 반환")
+                    return {
+                        "recommendations": [],
+                        "user_preference": user_preference,
+                        "total_count": 0,
+                        "notes": "요청하신 조건에 맞는 메뉴를 찾을 수 없습니다. 다른 요청사항으로 다시 시도해주세요."
+                    }
             
             result = {
                 "recommendations": recommendations,
